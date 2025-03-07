@@ -1,0 +1,164 @@
+---
+title: "HW2 Time Series"
+author: "Blue HW 1"
+date: "2024-09-13"
+output:
+  html_document:
+    toc: true
+    toc_depth: 1
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    df_print: paged
+---
+
+```{r, include = F}
+library(tidyverse)
+library(rstudioapi)
+library(tsibble)
+library(fabletools)
+library(scales)
+library(fable)
+library(feasts)
+setwd(dirname(getActiveDocumentContext()$path))
+data <- read.csv("energy_F2024.csv")
+```
+
+# Data Cleaning 
+```{r Data Cleaning}
+# Sum by day
+energyDay <- data %>% 
+  # Extract date
+  mutate(date = str_split_i(datetime_beginning_ept," ",1)) %>%
+  # Group by date and sum
+  group_by(date) %>% 
+  summarize(dailyAv = sum(mw)) 
+
+
+# Average by month
+energyTs <- energyDay %>% 
+  # Create and group month-year variable
+  mutate(yearMonth = yearmonth(paste0(str_split_i(date,"/",3),"-",str_split_i(date,"/",1)))) %>% group_by(yearMonth) %>% 
+  # Average 
+  summarize(monthAv = sum(dailyAv)/ n()) %>% 
+  rename("mw" = monthAv) %>% 
+  as_tsibble(index = yearMonth)
+
+# Splitting on training test and validation
+training <- energyTs[1:48,]
+validation <- energyTs[49:60,]
+test <- energyTs[61:72,]
+```
+
+
+# STL Decomp Plots
+```{r STL Decomp}
+# Creating STL Decomp
+dcmp <- training %>% model(stl = STL(mw)) %>% components() %>% as_tsibble()
+
+
+# Making trend graph 
+ggplot(data = dcmp, aes(x = yearMonth)) + 
+  geom_line(aes(y=trend,color = "Trend"),linewidth = 1.2,alpha = .5) + 
+  geom_point(aes(y = mw),colour = "black",size = 2.2) + 
+  geom_line(aes(y = mw), colour = "black",linewidth =1.2) + 
+  scale_color_manual(values = c("Trend" = "red")) + 
+  labs(
+        y ="Daily\nTotal MW",
+        title = "STL Decomp Trend of Daily Total MW Usage by Month",
+        x = "Month",
+        subtitle = "August 2018-July 2022\n\n",
+        colour = ""
+      ) + 
+  scale_y_continuous(labels = comma) + 
+  theme_classic() + 
+  theme(axis.title.y = element_text(angle = 0,vjust = .5))
+
+
+# Seasonality component graph 
+ggplot(data = dcmp, aes(x = yearMonth)) + 
+  geom_line(aes(y = season_year),linewidth = 1.2) +
+  geom_point(aes(y = season_year),size = 2.2) + 
+  labs(
+        y ="Daily\nTotal MW",
+        title = "STL Decomp Seasonality Component Graph",
+        x = "Month",
+        subtitle = "August 2018-July 2022\n\n"
+      ) + 
+  scale_y_continuous(labels = comma) + 
+  theme_classic() + 
+  theme(axis.title.y = element_text(angle = 0,vjust = .5))
+
+
+
+# Remainder Graph
+
+ggplot(data = dcmp, aes(x = yearMonth)) + 
+  geom_line(aes(y = remainder),linewidth = 1.2) +
+  geom_point(aes(y = remainder),size = 2.2) + 
+  labs(
+        y ="Daily\nTotal MW",
+        title = "STL Decomp Remainder Component Graph",
+        x = "Month",
+        subtitle = "August 2018-July 2022\n\n"
+      ) + 
+  scale_y_continuous(labels = comma) + 
+  theme_classic() + 
+  theme(axis.title.y = element_text(angle = 0,vjust = .5))
+
+```
+
+# Fs and Ft
+```{r Strength Assessment}
+strength <- training %>% features(mw, feat_stl)
+
+strength[1:2]
+```
+
+# Model Creation
+```{r Model}
+# Creating model
+mwModel <- training %>% model(ETS(mw ~ error("M") + trend("A") + season("M")))
+
+report(mwModel)
+```
+# Model Validation
+
+```{r Validation}
+# Getting MAPE from test set
+forecastTest <- mwModel %>% fabletools::forecast(h = 12)
+testAccuracy <- fabletools::accuracy(forecastTest,validation)
+
+MAPE <- testAccuracy$MAPE
+MAPE
+```
+
+# Validation Prediction Overlay
+```{r Prediction Graph}
+# Forecast all the way to end of data set
+forecastValid <- mwModel %>% fabletools::forecast(h = 12)
+
+# Create dataframe for plotting
+validDF <- data.frame(
+  month = forecastValid$yearMonth,
+  forecast = forecastValid$.mean,
+  validation= validation$mw
+  )
+
+# Plot validation and predicted values
+ggplot(data = validDF, aes(x = month)) + 
+  geom_line(aes(y = forecast, color = "Predicted"), linewidth = 1.2,alpha =.4) + 
+  geom_point(aes(y = forecast,color = "Predicted"),size = 2.2) + 
+  geom_line(aes(y = validation, color = "Actual"), linewidth = 1.2) + 
+  geom_point(aes(y = validation,color = "Actual"),size = 2.2) + 
+  scale_color_manual(values = c("Predicted" = "blue", "Actual" = "Orange")) + 
+  scale_y_continuous(labels = comma) + 
+  labs(colour = "",
+       title = "Forecasted Total Daily MW Usage by Month",
+       subtitle = "August 2022-July 2023\n\n",
+       y ="Daily\nTotal MW",
+       x = "Month") + 
+  theme_classic() + 
+  theme(axis.title.y = element_text(angle = 0,vjust = .5))
+
+```

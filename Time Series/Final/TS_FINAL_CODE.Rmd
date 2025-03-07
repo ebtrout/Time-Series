@@ -1,0 +1,210 @@
+---
+title: "TS Final Draft"
+author: "Blue HW 1"
+date: "2024-09-20"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(rstudioapi)
+library(tsibble)
+library(fabletools)
+library(scales)
+library(fable)
+library(forecast)
+library(feasts)
+setwd(dirname(getActiveDocumentContext()$path))
+data <- read.csv("energy_F2024.csv")
+```
+
+# Data Cleaning 
+```{r Data Cleaning}
+# Sum by day
+energyDay <- data %>% 
+  # Extract date
+  mutate(date = str_split_i(datetime_beginning_ept," ",1)) %>%
+  # Group by date and sum
+  group_by(date) %>% 
+  summarize(dailyAv = sum(mw)) 
+
+# Average by month
+energyTs <- energyDay %>% 
+  # Create and group month-year variable
+  mutate(yearMonth = yearmonth(paste0(str_split_i(date,"/",3),"-",str_split_i(date,"/",1)))) %>% group_by(yearMonth) %>% 
+  # Average 
+  summarize(monthAv = sum(dailyAv)/ n()) %>% 
+  rename("mw" = monthAv) %>% 
+  as_tsibble(index = yearMonth)
+
+# Splitting on training test and validation
+training <- energyTs[1:48,]
+validation <- energyTs[49:60,]
+test <- energyTs[61:72,]
+```
+
+# Model A
+
+## Model Creation
+```{r,fig.height = 3, fig.width=4}
+# ACF PACF
+ggAcf(training$mw)
+ggPacf(training$mw)
+
+# Unitroot test
+unitroot_kpss(training$mw)
+
+# Models on original data
+mwModel <- training %>% model(
+  arSearch = ARIMA(mw ~ 1 + pdq(2,1,0) + fourier(K = 2)),
+  maSearch = ARIMA(mw ~ 1 + pdq(0,1,0:2) + PDQ(0,0,0) + fourier(K = 2), stepwise = F),
+  dSearch = ARIMA(mw ~ 1 + pdq(0:2,1,0:2) + PDQ(0,0,0) + fourier(K = 2),stepwise = F),
+  fit = ARIMA(mw ~ 1 + pdq(2,1,2) + PDQ(0,0,0) + fourier(K = 2),stepwise = F)
+)
+
+mwModel
+
+glance(mwModel) %>% select(.model,BIC)
+```
+
+## White Noise Evaluation
+```{r}
+mwModel %>% select(dSearch) %>% gg_tsresiduals()
+augment(mwModel) %>% filter(.model=='dSearch') %>% features(.innov,ljung_box, lag=10, dof = 2)
+```
+
+## Forecasting
+```{r}
+forecastFourier <- mwModel %>% select(dSearch) %>% fabletools::forecast(h= 12)
+
+accuracy <- fabletools::accuracy(forecastFourier$.mean,validation$mw)
+
+fourierDF <- data.frame(
+  forecast = forecastFourier$.mean,
+  actual = validation$mw,
+  month = validation$yearMonth
+  )
+
+ggplot(data = fourierDF, aes(x = month)) + 
+  geom_line(aes(y = forecast, color = "Model A Forecast"), linewidth = 1.2,alpha =.6) + 
+  geom_point(aes(y = forecast,color = "Model A Forecast"),size = 2.2) + 
+  geom_line(aes(y = actual, color = "Observed"), linewidth = 1.2) + 
+  geom_point(aes(y = actual,color = "Observed"),size = 2.2) + 
+  scale_color_manual(values = c("Observed" = "orange", "Model A Forecast" = "#4CBB17")) + 
+  scale_y_continuous(labels = comma) + 
+  labs(colour = "",
+       title = "Model A Forecasted Total Daily MW Usage by Month",
+       subtitle = "August 2022-July 2023\n\n",
+       y ="Daily\nTotal MW",
+       x = "Month") + 
+  theme_classic() + 
+  theme(axis.title.y = element_text(angle = 0,vjust = .5))
+```
+
+
+# Model B
+
+## Model Creation
+```{r,fig.height = 3, fig.width= 4}
+# Getting seasonally adjusted data
+dcmp <- training %>% model(classic = classical_decomposition(mw)) %>% components() %>% as_tsibble()
+
+mwAdjust <- tsibble(data.frame(mwAdjust = dcmp$season_adjust,yearMonth = dcmp$yearMonth),index = yearMonth)
+
+# Plotting Acf Pacf
+
+ggAcf(mwAdjust$mwAdjust)
+ggPacf(mwAdjust$mwAdjust)
+
+# Unitroot test
+unitroot_kpss(mwAdjust$mwAdjust)
+
+# Creating models
+mwAdjustModel <- mwAdjust %>% model(
+  arSearch = ARIMA(mwAdjust ~ pdq(0:2,1,0) + PDQ(0,0,0), stepwise = F),
+  maSearch = ARIMA(mwAdjust ~ pdq(0,1,0:2) + PDQ(0,0,0), stepwise = F),
+  dSearch = ARIMA(mwAdjust ~ pdq(0:2,1,0:2) + PDQ(0,0,0),stepwise = F),
+  fit = ARIMA(mwAdjust ~ 0 + pdq(2,1,2) + PDQ(0,0,0),stepwise = F)
+)
+
+mwAdjustModel
+
+glance(mwAdjustModel) %>% select(.model,BIC)
+```
+
+
+## White Noise Evaluation
+
+```{r}
+# Looking at residuals
+mwAdjustModel %>% select(arSearch) %>% gg_tsresiduals()
+
+# Seeing if autocorrelation is gone
+augment(mwAdjustModel) %>% filter(.model=='arSearch') %>% features(.innov,ljung_box, lag=10, dof = 1)
+```
+
+## Forecasting
+
+```{r}
+# Seeing how it performs on seasonally adjusted validation data
+
+adjustYearVec <- dcmp$seasonal[1:12]
+
+# Forecasting 
+forecastClassic <- mwAdjustModel %>% select(arSearch) %>% fabletools::forecast(h= 12)
+
+# Adjusting data 
+forecastClassic <- cbind(data.frame(forecastClassic),adjust =forecastClassic$.mean + adjustYearVec)
+
+# Calculate accuracy
+accuracy <- fabletools::accuracy(forecastClassic$adjust,validation$mw)
+
+# Prepare plot
+classicDF <- data.frame(
+  forecast = forecastClassic$adjust, 
+  actual = validation$mw,
+  month = validation$yearMonth
+  )
+
+# Actual vs Predicted 
+ggplot(data = classicDF, aes(x = month)) + 
+  geom_line(aes(y = forecast, color = "Model B Forecast"), linewidth = 1.2,alpha =.4) + 
+  geom_point(aes(y = forecast,color = "Model B Forecast"),size = 2.2) + 
+  geom_line(aes(y = actual, color = "Observed"), linewidth = 1.2) + 
+  geom_point(aes(y = actual,color = "Observed"),size = 2.2) + 
+  scale_color_manual(values = c("Observed" = "orange", "Model B Forecast" = "blue")) + 
+  scale_y_continuous(labels = comma) + 
+  labs(colour = "",
+       title = "Model B Forecasted Total Daily MW Usage by Month",
+       subtitle = "August 2022-July 2023\n\n",
+       y ="Daily\nTotal MW",
+       x = "Month") + 
+  theme_classic() + 
+  theme(axis.title.y = element_text(angle = 0,vjust = .5))
+
+fullDF <- data.frame(fourier = forecastFourier$.mean,classical = forecastClassic$adjust, actual = validation$mw,month = validation$yearMonth)
+
+# Full Overlayed Plot
+ggplot(data = fullDF, aes(x = month)) + 
+  geom_line(aes(y = fourier, color = "Model A Forecast"), linewidth = 1.2,alpha =.7) + 
+  geom_point(aes(y = fourier,color = "Model A Forecast"),size = 2.2) + 
+  geom_line(aes(y = classical, color = "Model B Forecast"), linewidth = 1.2,alpha =.4) + 
+  geom_point(aes(y = classical,color = "Model B Forecast"),size = 2.2) + 
+  geom_line(aes(y = actual, color = "Observed"), linewidth = 1.2) + 
+  geom_point(aes(y = actual,color = "Observed"),size = 2.2) + 
+  scale_color_manual(values = c("Observed" = "orange", "Model A Forecast" = "#4CBB17", "Model B Forecast" = "blue")) + 
+  scale_y_continuous(labels = comma) + 
+  labs(colour = "",
+       title = "Model A and B Forecasted Total Daily MW Usage by Month",
+       subtitle = "August 2022-July 2023\n\n",
+       y ="Daily\nTotal MW",
+       x = "Month") + 
+  theme_classic() + 
+  theme(axis.title.y = element_text(angle = 0,vjust = .5))
+```

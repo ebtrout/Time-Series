@@ -1,0 +1,51 @@
+---
+title: "HW1 Time Series"
+author: "Ethan Trout"
+date: "2024-08-28"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(rstudioapi)
+library(tsibble)
+library(fabletools)
+library(fable)
+library(feasts)
+setwd(dirname(getActiveDocumentContext()$path))
+data <- read.csv("data/energy_F2024.csv")
+```
+
+
+```{r}
+# Sum by day
+energyDay <- data %>% 
+  # Extract date
+  mutate(date = str_split_i(datetime_beginning_ept," ",1)) %>%
+  # Group by date and sum
+  group_by(date) %>% 
+  summarize(dailyAv = sum(mw)) 
+
+
+# Average by month
+energyTs <- energyDay %>% 
+  # Create and group month-year variable
+  mutate(yearMonth = yearmonth(paste0(str_split_i(date,"/",3),"-",str_split_i(date,"/",1)))) %>% group_by(yearMonth) %>% 
+  # Average 
+  summarize(monthAv = sum(dailyAv)/ n()) %>% as_tsibble(index = yearMonth)
+
+
+training <- energyTs[1:48,]
+test <- energyTs[49:60,]
+validation <- energyTs[61:72,]
+```
+
+
+```{r}
+
+autoplot(training, monthAv) + labs(x = "Time (months)", y = "Total Daily MW") + ggtitle("Time Series Plot for Total Daily MW Averaged by Month")
+dcmp <- training |> model(stl = STL(monthAv))
+components(dcmp) %>% autoplot() 
+
+training %>% features(monthAv,feat_stl)
+```

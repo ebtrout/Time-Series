@@ -1,0 +1,323 @@
+---
+title: "Seasonal Models"
+author: "Ethan"
+date: "2024-10-03"
+output: pdf_document
+---
+
+```{r,include = F}
+library(rpart)
+library(tidyverse)
+library(rpart.plot)
+library(datasets)
+library(arules)
+library(arulesViz)
+library(ggplot2)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(TH.data)
+library(ISLR2)
+library(lattice)
+library(stats)
+library(rattle)
+library(RColorBrewer)
+library(caret)
+library(ROCR)
+library(tidyverse)  
+library(cluster)  
+library(factoextra) 
+library(gridExtra)
+library(NbClust)
+library(dendextend)
+library(class)
+library(ClustOfVar)
+library(gmodels)
+library(DescTools)
+library(ROCit)
+library(survival)
+library(MASS)
+library(kableExtra)
+library(partykit)
+library(dbscan)
+library(AmesHousing)
+library(rstudioapi)
+library(tidyverse)
+library(rstudioapi)
+library(fable.prophet)
+library(tsibble)
+library(fabletools)
+library(scales)
+library(fable)
+library(forecast)
+library(imputeTS)
+library(feasts)
+library(here)
+library(conflicted)
+library(reticulate)
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+```
+
+# Slide Deck 1 
+
+## Intro
+
+### Data Reading
+```{r}
+file.dir = "https://raw.githubusercontent.com/sjsimmo2/TimeSeries/master/"
+input.file1 = "usairlines.csv"
+USAirlines = read.csv(paste(file.dir, input.file1,sep = ""))
+USAirlines <- USAirlines %>%
+ mutate(date = yearmonth(lubridate::make_date(Year, Month)))
+USAirlines_ts <- as_tsibble(USAirlines, index = date)
+```
+
+### Splitting
+```{r}
+train <- USAirlines_ts %>%
+ select(Passengers, date, Month) %>%
+ filter_index(~ "2007-03")
+test <- USAirlines_ts %>%
+ select(Passengers, date, Month) %>%
+ filter_index("2007-04" ~ .)
+dcmp <- USAirlines_ts %>%
+ model(stl = STL(Passengers))
+components(dcmp) %>% autoplot()
+```
+
+### Exponential Smoothing
+```{r}
+model_HW <- train %>%
+ model(
+ ETS(Passengers ~ error("M") + trend("A") + season("M"))
+ )
+model_HW_for <- model_HW %>%
+ fabletools::forecast(h = 12)
+fabletools::accuracy(model_HW_for, test)
+```
+
+## Seasonal
+
+### Nsdiffs
+
+```{r}
+train %>%
+ features(Passengers, unitroot_nsdiffs)
+```
+### Unit Root Test
+```{r}
+train %>%
+ mutate(Pass_diff = difference(Passengers, lag = 12)) %>%
+ features(Pass_diff, unitroot_ndiffs)
+```
+
+### Dummy Variable Model
+
+```{r}
+season_lin <- lm(Passengers ~ factor(Month), data = train)
+summary(season_lin)
+
+model_SD_ARIMA <- train %>%
+ model(ARIMA(Passengers ~ factor(Month) + PDQ(0,0,0)))
+report(model_SD_ARIMA)
+```
+
+### Fourier
+```{r}
+model_F_ARIMA <- train %>%
+ model(ARIMA(Passengers ~ fourier(K = 6) + PDQ(0,0,0))
+)
+report(model_F_ARIMA)
+```
+
+## Stochastic
+
+### Seasonal Differencing 
+```{r}
+# Using 
+train %>%
+ gg_tsdisplay(difference(Passengers, 12), plot_type = 'partial', lag = 36)
+```
+
+
+# Slide Deck 3 Prophet Model
+
+## Making it 
+
+```{r,eval = F}
+# Making additonal holidays
+holidays <- data.frame(
+ holiday = 'Sep11',
+ ds = as.Date(c('2001-09-01', '2001-10-01', '2001-11-01',
+ '2001-12-01', '2002-01-01', '2002-02-01',
+ '2002-09-01')),
+ # Guessing this stops prophet from looking into the days around the ones we specify
+ lower_window = 0,
+ upper_window = 0
+)
+
+# Making the dataframe to build the model on
+prophet.data <- data.frame(ds = seq(as.Date('1990-01-01'), as.Date('2007-03-01'), by = 'm'), y = train$Passengers)
+
+# Add the holidays / point interventions we made
+Prof <- prophet::prophet(holidays = holidays,weekly.seasonality = TRUE,daily.seasonality = TRUE)
+
+# Add holidays up until 1995
+Prof <- add_country_holidays(Prof, "US")
+
+# Add a monthly seasonality with a prespecified period and fourier order
+Prof <- add_seasonality(Prof, name='monthly', period=30.5, fourier.order=6)
+
+# Fit the model
+Prof <- fit.prophet(Prof, prophet.data)
+```
+## Forecasting Prophet
+```{r}
+
+#
+forecast.data <- make_future_dataframe(Prof, periods = 12, freq = 'month')
+
+
+plot(Prof, predict(Prof, forecast.data))
+
+pred <- predict(Prof, forecast.data)
+
+pred$yhat
+
+
+Prophet.error <- test$Passengers - tail(pred$yhat,12)
+Prophet.MAE <- mean(abs(Prophet.error))
+Prophet.MAPE <- mean(abs(Prophet.error)/abs(test$Passengers))*100
+
+Prophet.MAPE
+```
+
+# Slide Deck 4 Neural Network
+
+
+## Making it
+```{r}
+train$Sep11 <- rep(0, 207)
+train$Sep11[141] <- 1
+
+set.seed(12345)
+model_nnet <- train %>%
+  mutate(diff_Pass = difference(Passengers, 12)) %>%
+  model(
+    # 
+    hand = NNETAR(diff_Pass ~ Sep11 + AR(p = 1, P = 3)),
+  
+    auto = NNETAR(diff_Pass ~ Sep11)  
+  )
+
+model_nnet %>%
+  select(auto) %>%
+  report()
+```
+Will not Difference for us. Must difference
+
+## Residual Investigation
+
+### Hand
+```{r}
+model_nnet %>%
+  select(hand) %>%
+  gg_tsresiduals()
+```
+
+### Auto
+```{r}
+model_nnet %>%
+  select(auto) %>%
+  gg_tsresiduals()
+```
+
+
+## Forecasting
+
+Since we took a difference, we must transform the forecasted values to non-differenced
+
+```{r}
+## Forecasting 
+test$Sep11 <- rep(0, 12)
+```
+
+### Forecasting takes so long holy shit
+```{r,eval = F}
+model_nnet_for <- fabletools::forecast(model_nnet, test)
+save(model_nnet_for,file = "model_nnet_for.RData")
+```
+### Adjusting differenced forecasts
+```{r}
+load("model_nnet_for.RData")
+
+nnet_for_hand <- rep(NA, 12)
+nnet_for_auto <- rep(NA, 12)
+
+for(i in 1:12){
+  nnet_for_hand[i] <- train$Passengers[length(train$Passengers) - 12 + i] + model_nnet_for$.mean[i]
+}
+
+for(i in 1:12){
+  nnet_for_auto[i] <- train$Passengers[length(train$Passengers) - 12 + i] + model_nnet_for$.mean[i+12]
+}
+```
+
+### Plotting forecasts
+
+```{r}
+Passenger <- ts(USAirlines$Passengers, start = 1990, frequency = 12)
+plot_pass <- subset(Passenger, end = length(Passenger) - 12)
+
+plot(plot_pass, main = "US Airline Passengers Forecasts", xlab = "Date", ylab = "Passengers (Thousands)", ylim = c(30000,80000), xlim = c(1990, 2009))
+lines(ts(nnet_for_auto, start = c(2007, 4), frequency = 12), col = "blue")
+lines(ts(nnet_for_hand, start = c(2007, 4), frequency = 12), col = "orange")
+abline(v = 2007.25, col = "red", lty = "dashed")
+```
+Looks pretty amazing
+
+### Calculating Mape and MAE
+
+```{r}
+NN_error_auto <- test$Passengers - nnet_for_auto
+
+NN_MAE_auto <- mean(abs(NN_error_auto))
+NN_MAPE_auto <- mean(abs(NN_error_auto)/abs(test$Passengers))*100
+
+NN_error_hand <- test$Passengers - nnet_for_hand
+
+NN_MAE_hand <- mean(abs(NN_error_hand))
+NN_MAPE_hand <- mean(abs(NN_error_hand)/abs(test$Passengers))*100
+
+NN_MAE_auto
+```
+
+```{r}
+NN_MAPE_auto
+```
+Oh my god its insnae
+
+# Slide Deck 5 - Ensemble Models
+
+```{r}
+Pass.Fit.NN <- rep(NA, 207)
+NN.Model = model_nnet %>% select(auto)
+fitted(NN.Model)
+for(i in 25:207){
+ Pass.Fit.NN[i] <- train[i - 24] + NN.Model$fitted[i - 12]
+}
+Pass.Fit.ARIMA <- Full.ARIMA$fitted
+Pass.Fit.HWES <- HWES.USAir.train$fitted
+Pass.Fit.Prophet <- head(predict(Prof, forecast.data)$yhat, 207)
+
+## This doesnt work exactly, but this code restricts all the coefficients to sum to one.
+## You set up your predictors as the forecasts, and then use the weights to average
+## Seems stupid, is stupid, I dont like it.
+WC.Model <- lm(training ~ offset(Pass.Fit.HWES) +
+ I(Pass.Fit.ARIMA - Pass.Fit.HWES) +
+ I(Pass.Fit.NN - Pass.Fit.HWES) +
+ I(Pass.Fit.Prophet - Pass.Fit.HWES) - 1)
+summary(WC.Model)
+
+```
